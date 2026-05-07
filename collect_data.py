@@ -105,29 +105,61 @@ def main():
         dk = day_key(t["date"])
         tvl_hist[dk] = t["totalLiquidityUSD"]
 
-    # 4) ETH price
-    eth_data = fetch_json(
-        "https://coins.llama.fi/chart/coingecko:ethereum?period=1d&span=2000",
-        "ETH price"
-    )
+    # 4) ETH price — use batchHistorical with daily sampling
+    #    Build timestamps from TVL date range, fetch in chunks
     eth_hist = {}
-    prices = eth_data.get("coins", {}).get("coingecko:ethereum", {}).get("prices", [])
-    for p in prices:
-        dk = day_key(p["timestamp"])
-        eth_hist[dk] = p["price"]
+    all_tvl_dates = sorted(tvl_hist.keys())
+    start_ts = all_tvl_dates[0]
+    end_ts = all_tvl_dates[-1]
+
+    # Use /chart endpoint with start/end (coins.llama.fi)
+    chart_url = (
+        f"https://coins.llama.fi/chart/coingecko:ethereum"
+        f"?start={start_ts}&end={end_ts}&period=1d"
+    )
+    try:
+        eth_data = fetch_json(chart_url, "ETH price (chart)")
+        prices = (
+            eth_data.get("coins", {})
+            .get("coingecko:ethereum", {})
+            .get("prices", [])
+        )
+        for p in prices:
+            dk = day_key(p["timestamp"])
+            eth_hist[dk] = p["price"]
+    except Exception:
+        # Fallback: fetch daily prices via /prices/historical
+        print("  Chart endpoint failed, falling back to historical prices...")
+        import time as _time
+        current = start_ts
+        while current <= end_ts:
+            try:
+                url = f"https://coins.llama.fi/prices/historical/{current}/coingecko:ethereum"
+                pdata = fetch_json(url, f"ETH {datetime.fromtimestamp(current, tz=timezone.utc).strftime('%Y-%m-%d')}")
+                price = pdata.get("coins", {}).get("coingecko:ethereum", {}).get("price")
+                if price:
+                    eth_hist[current] = price
+            except Exception:
+                pass
+            current += 86400 * 7  # weekly sampling for fallback
+            _time.sleep(0.3)
+
+    print(f"  → {len(eth_hist)} ETH price points")
 
     # 5) Merge & calculate CR
     print("\n  Merging data and calculating CR ...")
     all_dates = sorted(set(list(tvl_hist.keys()) + list(lusd_hist.keys())))
-    last_tvl, last_lusd = 0, 0
+    last_tvl, last_lusd, last_eth = 0, 0, 0
     merged = []
 
     for ts in all_dates:
         tvl = tvl_hist.get(ts, last_tvl)
         lusd_supply = lusd_hist.get(ts, last_lusd)
-        eth_price = eth_hist.get(ts)
+        eth_price = eth_hist.get(ts, last_eth)
         last_tvl = tvl
         last_lusd = lusd_supply
+        if eth_price:
+            last_eth = eth_price
 
         if lusd_supply > 0 and tvl > 0 and eth_price:
             cr = (tvl / lusd_supply) * 100
