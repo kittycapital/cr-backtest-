@@ -90,20 +90,42 @@ def main():
         f"https://stablecoins.llama.fi/stablecoin/{lusd_id}", "LUSD supply"
     )
     lusd_hist = {}
-    for t in lusd_data.get("tokens", []):
+    # Try both 'tokens' and 'tokensInUsd' keys
+    token_list = lusd_data.get("tokens") or lusd_data.get("tokensInUsd") or []
+    for t in token_list:
         dk = day_key(t["date"])
         circ = (t.get("circulating") or {}).get("peggedUSD", 0)
         if circ > 0:
             lusd_hist[dk] = circ
+    if lusd_hist:
+        lusd_dates = sorted(lusd_hist.keys())
+        print(f"  → LUSD: {len(lusd_hist)} points, "
+              f"{datetime.fromtimestamp(lusd_dates[0], tz=timezone.utc).strftime('%Y-%m-%d')} ~ "
+              f"{datetime.fromtimestamp(lusd_dates[-1], tz=timezone.utc).strftime('%Y-%m-%d')}")
+    else:
+        print("  ⚠ LUSD: 0 points!")
+        print(f"  Available keys in LUSD data: {list(lusd_data.keys())}")
 
-    # 3) Liquity V1 TVL
-    tvl_data = fetch_json(
-        "https://api.llama.fi/protocol/liquity-v1", "Liquity V1 TVL"
-    )
+    # 3) Liquity TVL — try multiple slugs
     tvl_hist = {}
-    for t in tvl_data.get("tvl", []):
-        dk = day_key(t["date"])
-        tvl_hist[dk] = t["totalLiquidityUSD"]
+    for slug in ["liquity", "liquity-v1"]:
+        try:
+            tvl_data = fetch_json(
+                f"https://api.llama.fi/protocol/{slug}", f"Liquity TVL ({slug})"
+            )
+            for t in tvl_data.get("tvl", []):
+                dk = day_key(t["date"])
+                tvl_hist[dk] = t["totalLiquidityUSD"]
+            if tvl_hist:
+                tvl_dates = sorted(tvl_hist.keys())
+                print(f"  → TVL ({slug}): {len(tvl_hist)} points, "
+                      f"{datetime.fromtimestamp(tvl_dates[0], tz=timezone.utc).strftime('%Y-%m-%d')} ~ "
+                      f"{datetime.fromtimestamp(tvl_dates[-1], tz=timezone.utc).strftime('%Y-%m-%d')}")
+                break  # success, stop trying
+        except Exception as e:
+            print(f"  {slug} failed: {e}")
+    if not tvl_hist:
+        raise RuntimeError("Could not fetch Liquity TVL from any slug")
 
     # 4) ETH price — read from local CSV + supplement recent from CoinGecko
     eth_hist = {}
@@ -141,9 +163,23 @@ def main():
             print(f"  CoinGecko supplement failed (non-critical): {e}")
 
     print(f"  → {len(eth_hist)} total ETH price points")
+    if eth_hist:
+        eth_dates = sorted(eth_hist.keys())
+        print(f"  → ETH range: "
+              f"{datetime.fromtimestamp(eth_dates[0], tz=timezone.utc).strftime('%Y-%m-%d')} ~ "
+              f"{datetime.fromtimestamp(eth_dates[-1], tz=timezone.utc).strftime('%Y-%m-%d')}")
 
     # 5) Merge & calculate CR
     print("\n  Merging data and calculating CR ...")
+
+    # Debug: show overlap
+    tvl_set = set(tvl_hist.keys())
+    lusd_set = set(lusd_hist.keys())
+    eth_set = set(eth_hist.keys())
+    overlap = tvl_set & lusd_set & eth_set
+    print(f"  TVL dates: {len(tvl_set)}, LUSD dates: {len(lusd_set)}, ETH dates: {len(eth_set)}")
+    print(f"  3-way overlap: {len(overlap)} dates")
+
     all_dates = sorted(set(list(tvl_hist.keys()) + list(lusd_hist.keys())))
     last_tvl, last_lusd, last_eth = 0, 0, 0
     merged = []
