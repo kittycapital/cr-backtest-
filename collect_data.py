@@ -105,46 +105,42 @@ def main():
         dk = day_key(t["date"])
         tvl_hist[dk] = t["totalLiquidityUSD"]
 
-    # 4) ETH price — use batchHistorical with daily sampling
-    #    Build timestamps from TVL date range, fetch in chunks
+    # 4) ETH price — read from local CSV + supplement recent from CoinGecko
     eth_hist = {}
-    all_tvl_dates = sorted(tvl_hist.keys())
-    start_ts = all_tvl_dates[0]
-    end_ts = all_tvl_dates[-1]
+    import csv
+    ETH_CSV = "ethereum.csv"
+    print(f"  Reading {ETH_CSV} ...")
+    with open(ETH_CSV, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # format: "2021-04-05 00:00:00 UTC"
+            dt = datetime.strptime(row["snapped_at"][:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            dk = day_key(int(dt.timestamp()))
+            price = float(row["price"])
+            if price > 0:
+                eth_hist[dk] = price
+    print(f"  → {len(eth_hist)} ETH price points from CSV")
 
-    # Use /chart endpoint with start/end (coins.llama.fi)
-    chart_url = (
-        f"https://coins.llama.fi/chart/coingecko:ethereum"
-        f"?start={start_ts}&end={end_ts}&period=1d"
-    )
-    try:
-        eth_data = fetch_json(chart_url, "ETH price (chart)")
-        prices = (
-            eth_data.get("coins", {})
-            .get("coingecko:ethereum", {})
-            .get("prices", [])
-        )
-        for p in prices:
-            dk = day_key(p["timestamp"])
-            eth_hist[dk] = p["price"]
-    except Exception:
-        # Fallback: fetch daily prices via /prices/historical
-        print("  Chart endpoint failed, falling back to historical prices...")
-        import time as _time
-        current = start_ts
-        while current <= end_ts:
-            try:
-                url = f"https://coins.llama.fi/prices/historical/{current}/coingecko:ethereum"
-                pdata = fetch_json(url, f"ETH {datetime.fromtimestamp(current, tz=timezone.utc).strftime('%Y-%m-%d')}")
-                price = pdata.get("coins", {}).get("coingecko:ethereum", {}).get("price")
-                if price:
-                    eth_hist[current] = price
-            except Exception:
-                pass
-            current += 86400 * 7  # weekly sampling for fallback
-            _time.sleep(0.3)
+    # Supplement: fill dates after CSV with CoinGecko API
+    max_csv_ts = max(eth_hist.keys()) if eth_hist else 0
+    today_ts = day_key(int(datetime.now(timezone.utc).timestamp()))
+    gap_days = (today_ts - max_csv_ts) // 86400
+    if gap_days > 1:
+        print(f"  CSV is {gap_days} days behind, fetching recent from CoinGecko...")
+        try:
+            cg_url = f"https://api.coingecko.com/api/v3/coins/ethereum/market_chart?vs_currency=usd&days={gap_days + 5}&interval=daily"
+            cg_data = fetch_json(cg_url, "ETH recent (CoinGecko)")
+            added = 0
+            for ts_ms, price in cg_data.get("prices", []):
+                dk = day_key(ts_ms / 1000)
+                if dk > max_csv_ts and price > 0:
+                    eth_hist[dk] = price
+                    added += 1
+            print(f"  → +{added} recent points from CoinGecko")
+        except Exception as e:
+            print(f"  CoinGecko supplement failed (non-critical): {e}")
 
-    print(f"  → {len(eth_hist)} ETH price points")
+    print(f"  → {len(eth_hist)} total ETH price points")
 
     # 5) Merge & calculate CR
     print("\n  Merging data and calculating CR ...")
