@@ -73,38 +73,29 @@ def main():
     print("Liquity CR Signal — Data Collection")
     print("=" * 60)
 
-    # 1) Stablecoins list → find LUSD id
-    stables = fetch_json("https://stablecoins.llama.fi/stablecoins", "stablecoins list")
-    lusd = next(
-        (s for s in stables.get("peggedAssets", [])
-         if s.get("symbol") == "LUSD" or "liquity" in s.get("name", "").lower()),
-        None
-    )
-    if not lusd:
-        raise RuntimeError("LUSD not found in DeFiLlama stablecoins")
-    lusd_id = lusd["id"]
-    print(f"  → LUSD id = {lusd_id}")
-
-    # 2) LUSD supply history
-    lusd_data = fetch_json(
-        f"https://stablecoins.llama.fi/stablecoin/{lusd_id}", "LUSD supply"
-    )
+    # 1) LUSD supply — read from local CSV (lusd-usd-max.csv)
+    #    market_cap ≈ total LUSD supply (since LUSD ≈ $1)
     lusd_hist = {}
-    # Try both 'tokens' and 'tokensInUsd' keys
-    token_list = lusd_data.get("tokens") or lusd_data.get("tokensInUsd") or []
-    for t in token_list:
-        dk = day_key(t["date"])
-        circ = (t.get("circulating") or {}).get("peggedUSD", 0)
-        if circ > 0:
-            lusd_hist[dk] = circ
+    import csv
+    LUSD_CSV = "lusd-usd-max.csv"
+    print(f"  Reading {LUSD_CSV} ...")
+    with open(LUSD_CSV, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            dt = datetime.strptime(row["snapped_at"][:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            dk = day_key(int(dt.timestamp()))
+            mcap = float(row["market_cap"])
+            price = float(row["price"])
+            # supply = market_cap / price for accuracy
+            if mcap > 0 and price > 0:
+                lusd_hist[dk] = mcap / price
     if lusd_hist:
         lusd_dates = sorted(lusd_hist.keys())
         print(f"  → LUSD: {len(lusd_hist)} points, "
               f"{datetime.fromtimestamp(lusd_dates[0], tz=timezone.utc).strftime('%Y-%m-%d')} ~ "
               f"{datetime.fromtimestamp(lusd_dates[-1], tz=timezone.utc).strftime('%Y-%m-%d')}")
     else:
-        print("  ⚠ LUSD: 0 points!")
-        print(f"  Available keys in LUSD data: {list(lusd_data.keys())}")
+        raise RuntimeError("No LUSD data found in CSV")
 
     # 3) Liquity TVL — try multiple slugs
     tvl_hist = {}
